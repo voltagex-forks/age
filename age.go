@@ -123,6 +123,7 @@ const streamNonceSize = 16
 // The caller must call Close on the WriteCloser when done for the last chunk to
 // be encrypted and flushed to dst.
 func Encrypt(dst io.Writer, recipients ...Recipient) (io.WriteCloser, error) {
+	fmt.Println("Got to Encrypt()")
 	if len(recipients) == 0 {
 		return nil, errors.New("no recipients specified")
 	}

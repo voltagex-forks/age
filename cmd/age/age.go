@@ -7,18 +7,22 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strings"
 
 	"filippo.io/age"
 	"filippo.io/age/agessh"
 	"filippo.io/age/armor"
 	"filippo.io/age/plugin"
+	"golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 )
 
@@ -107,16 +111,17 @@ func main() {
 	}
 
 	var (
-		outFlag                          string
-		decryptFlag, encryptFlag         bool
-		passFlag, versionFlag, armorFlag bool
-		recipientFlags                   multiFlag
-		recipientsFileFlags              multiFlag
-		identityFlags                    identityFlags
+		outFlag                             string
+		decryptFlag, encryptFlag, agentFlag bool
+		passFlag, versionFlag, armorFlag    bool
+		recipientFlags                      multiFlag
+		recipientsFileFlags                 multiFlag
+		identityFlags                       identityFlags
 	)
 
 	flag.BoolVar(&versionFlag, "version", false, "print the version")
 	flag.BoolVar(&decryptFlag, "d", false, "decrypt the input")
+	flag.BoolVar(&agentFlag, "g", true, "use SSH agent")
 	flag.BoolVar(&decryptFlag, "decrypt", false, "decrypt the input")
 	flag.BoolVar(&encryptFlag, "e", false, "encrypt the input")
 	flag.BoolVar(&encryptFlag, "encrypt", false, "encrypt the input")
@@ -282,7 +287,7 @@ func main() {
 	case passFlag:
 		encryptPass(in, out, armorFlag)
 	default:
-		encryptNotPass(recipientFlags, recipientsFileFlags, identityFlags, in, out, armorFlag)
+		encryptNotPass(recipientFlags, recipientsFileFlags, identityFlags, agentFlag, in, out, armorFlag)
 	}
 }
 
@@ -314,46 +319,56 @@ func passphrasePromptForEncryption() (string, error) {
 	return p, nil
 }
 
-func encryptNotPass(recs, files []string, identities identityFlags, in io.Reader, out io.Writer, armor bool) {
+func encryptNotPass(recs, files []string, identities identityFlags, useAgent bool, in io.Reader, out io.Writer, armor bool) {
+	fmt.Printf("useAgent is %s\n\n", useAgent)
 	var recipients []age.Recipient
-	for _, arg := range recs {
-		r, err := parseRecipient(arg)
-		if err, ok := err.(gitHubRecipientError); ok {
-			errorWithHint(err.Error(), "instead, use recipient files like",
-				"    curl -O https://github.com/"+err.username+".keys",
-				"    age -R "+err.username+".keys")
-		}
-		if err != nil {
-			errorf("%v", err)
-		}
-		recipients = append(recipients, r)
-	}
-	for _, name := range files {
-		recs, err := parseRecipientsFile(name)
-		if err != nil {
-			errorf("failed to parse recipient file %q: %v", name, err)
-		}
-		recipients = append(recipients, recs...)
-	}
-	for _, f := range identities {
-		switch f.Type {
-		case "i":
-			ids, err := parseIdentitiesFile(f.Value)
-			if err != nil {
-				errorf("reading %q: %v", f.Value, err)
+	if !useAgent {
+		for _, arg := range recs {
+			r, err := parseRecipient(arg)
+			if err, ok := err.(gitHubRecipientError); ok {
+				errorWithHint(err.Error(), "instead, use recipient files like",
+					"    curl -O https://github.com/"+err.username+".keys",
+					"    age -R "+err.username+".keys")
 			}
-			r, err := identitiesToRecipients(ids)
 			if err != nil {
-				errorf("internal error processing %q: %v", f.Value, err)
+				errorf("%v", err)
 			}
-			recipients = append(recipients, r...)
-		case "j":
-			id, err := plugin.NewIdentityWithoutData(f.Value, pluginTerminalUI)
-			if err != nil {
-				errorf("initializing %q: %v", f.Value, err)
-			}
-			recipients = append(recipients, id.Recipient())
+			recipients = append(recipients, r)
 		}
+
+		for _, name := range files {
+			recs, err := parseRecipientsFile(name)
+			if err != nil {
+				errorf("failed to parse recipient file %q: %v", name, err)
+			}
+			recipients = append(recipients, recs...)
+		}
+
+		for _, f := range identities {
+			switch f.Type {
+			case "i":
+				ids, err := parseIdentitiesFile(f.Value)
+				if err != nil {
+					errorf("reading %q: %v", f.Value, err)
+				}
+				r, err := identitiesToRecipients(ids)
+				if err != nil {
+					errorf("internal error processing %q: %v", f.Value, err)
+				}
+				recipients = append(recipients, r...)
+			case "j":
+				id, err := plugin.NewIdentityWithoutData(f.Value, pluginTerminalUI)
+				if err != nil {
+					errorf("initializing %q: %v", f.Value, err)
+				}
+				recipients = append(recipients, id.Recipient())
+			}
+		}
+
+	} else {
+		fmt.Println("About to run getIdentitiesFromAgent()\n")
+		recipients, _ = getRecipientFromAgent(recs)
+		fmt.Printf("Matched %d identities from agent\n", len(recipients))
 	}
 	encrypt(recipients, in, out, armor)
 }
@@ -434,6 +449,44 @@ func decryptNotPass(flags identityFlags, in io.Reader, out io.Writer) {
 	}
 
 	decrypt(identities, in, out)
+}
+
+func getRecipientFromAgent(recs []string) ([]age.Recipient, error) {
+	var ageRecipients []age.Recipient
+	sshAgent, err := net.Dial("unix", os.Getenv("SSH_AUTH_SOCK"))
+	if err != nil {
+		fmt.Printf("err running Dial in getIdentitiesFromAgent: %s\n", err)
+		return nil, nil
+	}
+
+	agent := agent.NewClient(sshAgent)
+	identities, err := agent.List()
+	if err != nil {
+		fmt.Println("Error getting identities")
+	}
+
+	for _, rec := range recs {
+		fmt.Printf("ID from rec: %v\n", rec)
+	}
+	// for _, selectedIdentities := range identiidentitiesFromFlags {
+	for _, availableIdentity := range identities {
+		fmt.Printf("ID from agent: %v\n", availableIdentity)
+		//https://cs.opensource.google/go/x/crypto/+/master:ssh/agent/client.go;l=254
+		if slices.Contains(recs, base64.StdEncoding.EncodeToString(availableIdentity.Blob)) ||
+			slices.Contains(recs, availableIdentity.Comment) {
+
+			identityString := fmt.Sprintf("%s %s", availableIdentity.Format, base64.StdEncoding.EncodeToString(availableIdentity.Blob))
+			fmt.Printf("Passing %s to parseIdentites\n", identityString)
+			i, err := agessh.ParseRecipient(identityString)
+			if err != nil {
+				return nil, err
+			}
+
+			ageRecipients = append(ageRecipients, i)
+		}
+	}
+
+	return ageRecipients, nil
 }
 
 func decryptPass(in io.Reader, out io.Writer) {

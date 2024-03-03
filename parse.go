@@ -78,6 +78,7 @@ func ParseRecipients(f io.Reader) ([]Recipient, error) {
 		return nil, fmt.Errorf("failed to read recipients file: %v", err)
 	}
 	if len(recs) == 0 {
+		fmt.Println("len(recs) == 0 in ParseRecipients")
 		return nil, fmt.Errorf("no recipients found")
 	}
 	return recs, nil

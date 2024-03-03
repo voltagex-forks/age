@@ -29,6 +29,7 @@ func (gitHubRecipientError) Error() string {
 }
 
 func parseRecipient(arg string) (age.Recipient, error) {
+	fmt.Printf("In parseRecipient, arg was %s\n", arg)
 	switch {
 	case strings.HasPrefix(arg, "age1") && strings.Count(arg, "1") > 1:
 		return plugin.NewRecipient(arg, pluginTerminalUI)
@@ -46,6 +47,7 @@ func parseRecipient(arg string) (age.Recipient, error) {
 
 func parseRecipientsFile(name string) ([]age.Recipient, error) {
 	var f *os.File
+
 	if name == "-" {
 		if stdinInUse {
 			return nil, fmt.Errorf("standard input is used for multiple purposes")
@@ -92,6 +94,7 @@ func parseRecipientsFile(name string) ([]age.Recipient, error) {
 		return nil, fmt.Errorf("%q: failed to read recipients file: %v", name, err)
 	}
 	if len(recs) == 0 {
+		fmt.Println("len(recs) == 0 in parseRecipientsFile")
 		return nil, fmt.Errorf("%q: no recipients found", name)
 	}
 	return recs, nil
